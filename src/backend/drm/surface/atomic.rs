@@ -1,3 +1,5 @@
+use drm::Device as _;
+use drm::DriverCapability;
 use drm::control::Device as ControlDevice;
 use drm::control::atomic::AtomicModeReq;
 use drm::control::connector::Interface;
@@ -172,6 +174,8 @@ pub struct AtomicDrmSurface {
     prop_mapping: Arc<RwLock<PropMapping>>,
     state: RwLock<State>,
     pending: RwLock<State>,
+    /// Whether the driver can flip asynchronously, asked once.
+    supports_async_page_flip: std::sync::OnceLock<bool>,
     pub(super) span: tracing::Span,
 }
 
@@ -219,6 +223,7 @@ impl AtomicDrmSurface {
             prop_mapping,
             state: RwLock::new(state),
             pending: RwLock::new(pending),
+            supports_async_page_flip: std::sync::OnceLock::new(),
             span,
         };
 
@@ -689,6 +694,20 @@ impl AtomicDrmSurface {
         *self.pending.read().unwrap() != *self.state.read().unwrap()
     }
 
+    /// Whether this driver can flip a page asynchronously through the atomic
+    /// API, which is what tearing needs.
+    ///
+    /// Asked once and remembered: it is a property of the driver, and an ioctl
+    /// per frame to learn something that cannot change is a poor trade.
+    pub fn supports_async_page_flip(&self) -> bool {
+        *self.supports_async_page_flip.get_or_init(|| {
+            self.fd
+                .get_driver_capability(DriverCapability::AtomicASyncPageFlip)
+                .map(|value| value != 0)
+                .unwrap_or(false)
+        })
+    }
+
     #[instrument(level = "trace", parent = &self.span, skip(self, planes))]
     #[profiling::function]
     pub fn test_state<'a>(
@@ -869,6 +888,7 @@ impl AtomicDrmSurface {
         &self,
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         event: bool,
+        allow_tearing: bool,
     ) -> Result<(), Error> {
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
@@ -893,14 +913,22 @@ impl AtomicDrmSurface {
         // If we would set anything here, that would require a modeset, this would fail,
         // indicating a problem in our assumptions.
         trace!(?planes, "Queueing page flip: {:?}", req);
+        let mut flags = AtomicCommitFlags::NONBLOCK;
+        if event {
+            flags |= AtomicCommitFlags::PAGE_FLIP_EVENT;
+        }
+        // An asynchronous flip lands the moment the hardware can take it
+        // rather than at the next vblank, which is what tearing is: the frame
+        // reaches the screen part-drawn instead of a frame late. Only where
+        // the driver says it can, because a commit with a flag it does not
+        // know is refused outright and the output stops rather than tears.
+        if allow_tearing && self.supports_async_page_flip() {
+            flags |= AtomicCommitFlags::PAGE_FLIP_ASYNC;
+        }
         let res = self
             .fd
             .atomic_commit(
-                if event {
-                    AtomicCommitFlags::PAGE_FLIP_EVENT | AtomicCommitFlags::NONBLOCK
-                } else {
-                    AtomicCommitFlags::NONBLOCK
-                },
+                flags,
                 req.build()?,
             )
             .map_err(|source| {
