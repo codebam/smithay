@@ -431,13 +431,28 @@ impl DrmSurface {
         &self,
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         event: bool,
+        allow_tearing: bool,
     ) -> Result<(), Error> {
         match &*self.internal {
-            DrmSurfaceInternal::Atomic(surf) => surf.page_flip(planes, event),
+            DrmSurfaceInternal::Atomic(surf) => surf.page_flip(planes, event, allow_tearing),
             DrmSurfaceInternal::Legacy(surf) => {
                 let fb = ensure_legacy_planes(self, planes)?;
-                surf.page_flip(fb, event)
+                surf.page_flip(fb, event, allow_tearing)
             }
+        }
+    }
+
+    /// Whether this driver can flip a page asynchronously.
+    ///
+    /// An asynchronous flip lands as soon as the hardware can take it rather
+    /// than at the next vblank — the frame reaches the screen part-drawn
+    /// instead of a frame late, which is the trade a game asks for through
+    /// tearing-control. A driver that cannot do it says so here, and a
+    /// compositor that asks anyway is quietly given an ordinary flip.
+    pub fn supports_async_page_flip(&self) -> bool {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surf) => surf.supports_async_page_flip(),
+            DrmSurfaceInternal::Legacy(surf) => surf.supports_async_page_flip(),
         }
     }
 
