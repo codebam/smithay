@@ -1,3 +1,4 @@
+use drm::Device as _;
 use drm::control::{Device as ControlDevice, Mode, PageFlipFlags, connector, crtc, encoder, framebuffer};
 
 use std::collections::HashSet;
@@ -87,6 +88,8 @@ pub struct LegacyDrmSurface {
     state: RwLock<State>,
     pending: RwLock<State>,
     dpms: Mutex<bool>,
+    /// Whether the driver can flip asynchronously, asked once.
+    supports_async_page_flip: std::sync::OnceLock<bool>,
     pub(super) span: tracing::Span,
 }
 
@@ -116,6 +119,7 @@ impl LegacyDrmSurface {
             state: RwLock::new(state),
             pending: RwLock::new(pending),
             dpms: Mutex::new(true),
+            supports_async_page_flip: std::sync::OnceLock::new(),
             span,
         };
 
@@ -333,7 +337,23 @@ impl LegacyDrmSurface {
 
     #[instrument(level = "trace", parent = &self.span, skip(self))]
     #[profiling::function]
-    pub fn page_flip(&self, framebuffer: framebuffer::Handle, event: bool) -> Result<(), Error> {
+    /// Whether this driver can flip a page asynchronously, which is what
+    /// tearing needs.
+    pub fn supports_async_page_flip(&self) -> bool {
+        *self.supports_async_page_flip.get_or_init(|| {
+            self.fd
+                .get_driver_capability(drm::DriverCapability::ASyncPageFlip)
+                .map(|value| value != 0)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn page_flip(
+        &self,
+        framebuffer: framebuffer::Handle,
+        event: bool,
+        allow_tearing: bool,
+    ) -> Result<(), Error> {
         trace!("Queueing Page flip");
 
         if !self.active.load(Ordering::SeqCst) {
@@ -351,10 +371,19 @@ impl LegacyDrmSurface {
             &*self.fd,
             self.crtc,
             framebuffer,
-            if event {
-                PageFlipFlags::EVENT
-            } else {
-                PageFlipFlags::empty()
+            {
+                let mut flags = if event {
+                    PageFlipFlags::EVENT
+                } else {
+                    PageFlipFlags::empty()
+                };
+                // As in the atomic path: only where the driver says it can,
+                // because a flip with a flag it does not know is refused and
+                // the output stops rather than tears.
+                if allow_tearing && self.supports_async_page_flip() {
+                    flags |= PageFlipFlags::ASYNC;
+                }
+                flags
             },
             None,
         )
