@@ -750,11 +750,13 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
         supports_fencing: bool,
         allow_partial_update: bool,
         event: bool,
+        allow_tearing: bool,
     ) -> Result<(), crate::backend::drm::error::Error> {
         debug_assert!(!self.planes.iter().any(|(_, state)| state.needs_test));
         surface.page_flip(
             self.build_planes(surface, supports_fencing, allow_partial_update),
             event,
+            allow_tearing,
         )
     }
 
@@ -1061,6 +1063,11 @@ where
     primary_plane_element_id: Id,
     primary_plane_damage_bag: DamageBag<i32, BufferCoords>,
     supports_fencing: bool,
+    /// Whether a frame may be flipped in as soon as the hardware can take it,
+    /// rather than at the next vblank. Off unless something asks: tearing is
+    /// a trade — latency for a part-drawn frame — and only the client running
+    /// full-screen knows it wants it.
+    allow_tearing: bool,
     reset_pending: bool,
     signaled_fence: Option<Arc<OwnedFd>>,
 
@@ -1267,6 +1274,7 @@ where
                         opaque_regions: Vec::new(),
                         element_opaque_regions_workhouse: Vec::new(),
                         supports_fencing,
+                        allow_tearing: false,
                         debug_flags: DebugFlags::empty(),
                         span,
                     };
@@ -1449,6 +1457,7 @@ where
             opaque_regions: Vec::new(),
             element_opaque_regions_workhouse: Vec::new(),
             supports_fencing,
+            allow_tearing: false,
             debug_flags: DebugFlags::empty(),
             span,
         };
@@ -2552,7 +2561,13 @@ where
         } else {
             prepared_frame
                 .frame
-                .page_flip(&self.surface, self.supports_fencing, allow_partial_update, true)
+                .page_flip(
+                    &self.surface,
+                    self.supports_fencing,
+                    allow_partial_update,
+                    true,
+                    self.allow_tearing,
+                )
         };
 
         let res = self.handle_flip(&prepared_frame, flip);
@@ -2741,6 +2756,27 @@ where
     /// Doing so might cause the next frame to trigger a modeset.
     /// Check [`DrmCompositor::vrr_supported`], which indicates if VRR can be
     /// used without a modeset on the attached connectors.
+    /// Allow this output's frames to be flipped in as soon as the hardware
+    /// can take them, rather than at the next vblank.
+    ///
+    /// This is tearing: a frame reaches the screen part-drawn instead of a
+    /// frame late, which is the trade a full-screen game asks for through
+    /// tearing-control-v1. Off by default, because everything else on a
+    /// desktop would rather have the whole frame.
+    ///
+    /// Returns whether the request will actually be honoured — a driver that
+    /// cannot flip asynchronously is given an ordinary flip, and saying so
+    /// here is the only way a compositor can tell.
+    pub fn set_allow_tearing(&mut self, allow: bool) -> bool {
+        self.allow_tearing = allow;
+        !allow || self.surface.supports_async_page_flip()
+    }
+
+    /// Whether frames are currently allowed to tear.
+    pub fn allow_tearing(&self) -> bool {
+        self.allow_tearing
+    }
+
     pub fn use_vrr(&mut self, vrr: bool) -> FrameResult<(), A, F> {
         self.surface.use_vrr(vrr).map_err(FrameError::DrmError)
     }
