@@ -16,6 +16,7 @@ use wayland_server::{
 use xkbcommon::xkb;
 
 use crate::input::keyboard::{KeyboardTarget, KeymapFile, ModifiersState};
+use super::VirtualKeyboardKeyFilter;
 use crate::{
     input::{Seat, SeatHandler},
     utils::SERIAL_COUNTER,
@@ -73,7 +74,7 @@ impl<D: SeatHandler> fmt::Debug for VirtualKeyboardUserData<D> {
 
 impl<D> Dispatch2<ZwpVirtualKeyboardV1, D> for VirtualKeyboardUserData<D>
 where
-    D: SeatHandler + 'static,
+    D: SeatHandler + VirtualKeyboardKeyFilter + 'static,
     <D as SeatHandler>::KeyboardFocus: WaylandFocus,
 {
     fn request(
@@ -90,6 +91,43 @@ where
                 update_keymap(self, format, fd, size as usize);
             }
             zwp_virtual_keyboard_v1::Request::Key { time, key, state } => {
+                // This should be wl_keyboard::KeyState, but the protocol does not state
+                // the parameter is an enum.
+                let key_state = if state == 1 {
+                    KeyState::Pressed
+                } else {
+                    KeyState::Released
+                };
+
+                // The compositor first, before anything is sent anywhere.
+                //
+                // The keysym has to be resolved here, against this keyboard's
+                // own keymap: the client chose the keycode out of the keymap it
+                // uploaded, and the seat's keymap is a different one that maps
+                // the same code to something else. Resolving it later, or
+                // elsewhere, gets the wrong key.
+                //
+                // The lock is dropped first. Whatever the compositor does with
+                // the key is likely to reach back into this seat, and holding
+                // this keyboard's lock across that is a deadlock waiting for a
+                // binding that touches it.
+                let intercepted = {
+                    let mut virtual_data = self.handle.inner.lock().unwrap();
+                    let Some(vk_state) = virtual_data.state.as_mut() else {
+                        virtual_keyboard.post_error(NoKeymap, "`key` sent before keymap.");
+                        return;
+                    };
+                    // Evdev keycodes are offset by 8 in XKB, as everywhere else
+                    // this protocol meets it.
+                    let keysym = vk_state.state.key_get_one_sym(xkb::Keycode::new(key + 8));
+                    let mods = vk_state.mods;
+                    drop(virtual_data);
+                    user_data.virtual_keyboard_key(&self.seat, keysym, mods, key, key_state, time)
+                };
+                if intercepted {
+                    return;
+                }
+
                 // Ensure keymap was initialized.
                 let mut virtual_data = self.handle.inner.lock().unwrap();
                 let vk_state = match virtual_data.state.as_mut() {
@@ -108,14 +146,6 @@ where
 
                 if let Some(wl_surface) = focus.and_then(|f| f.wl_surface()) {
                     for_each_focused_kbds(&self.seat, &wl_surface, |kbd| {
-                        // This should be wl_keyboard::KeyState, but the protocol does not state
-                        // the parameter is an enum.
-                        let key_state = if state == 1 {
-                            KeyState::Pressed
-                        } else {
-                            KeyState::Released
-                        };
-
                         kbd.key(SERIAL_COUNTER.next_serial().0, time, key, key_state);
                     });
                 }
