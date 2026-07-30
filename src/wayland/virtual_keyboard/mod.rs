@@ -63,6 +63,39 @@ mod virtual_keyboard_handle;
 
 pub use virtual_keyboard_handle::VirtualKeyboardUserData;
 
+/// A compositor's chance to act on a key from a virtual keyboard.
+///
+/// Keys from `zwp_virtual_keyboard_v1` go straight to the focused client,
+/// because a virtual keyboard carries its own keymap and the seat's key
+/// handling resolves keysyms against the seat's. That means a compositor never
+/// sees them, and everything it does with a key — its bindings, a chooser that
+/// has taken the keyboard, a session lock — is invisible to `wtype` and to any
+/// other client of this protocol. In wlroots the same events arrive as a
+/// keyboard device on the seat and do reach the compositor, so tools written
+/// against that behaviour quietly do nothing here.
+///
+/// The keysym is resolved against the virtual keyboard's own keymap before the
+/// compositor sees it, which is the part that cannot be done afterwards: the
+/// client picked the keycode out of a keymap it uploaded, and against any
+/// other keymap it means something else.
+pub trait VirtualKeyboardKeyFilter: SeatHandler + Sized {
+    /// Return `true` to keep the key, `false` to let it through to the client.
+    ///
+    /// The default keeps nothing, which is the behaviour of this protocol
+    /// before the hook existed.
+    fn virtual_keyboard_key(
+        &mut self,
+        _seat: &Seat<Self>,
+        _keysym: xkbcommon::xkb::Keysym,
+        _mods: crate::input::keyboard::ModifiersState,
+        _keycode: u32,
+        _state: wayland_server::protocol::wl_keyboard::KeyState,
+        _time: u32,
+    ) -> bool {
+        false
+    }
+}
+
 /// State of wp misc virtual keyboard protocol
 #[derive(Debug)]
 pub struct VirtualKeyboardManagerState {
