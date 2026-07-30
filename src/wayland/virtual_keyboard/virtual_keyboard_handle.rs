@@ -119,10 +119,31 @@ where
                     };
                     // Evdev keycodes are offset by 8 in XKB, as everywhere else
                     // this protocol meets it.
-                    let keysym = vk_state.state.key_get_one_sym(xkb::Keycode::new(key + 8));
+                    let keycode = xkb::Keycode::new(key + 8);
+                    let keysym = vk_state.state.key_get_one_sym(keycode);
+                    // The symbol on the key rather than the one the modifiers
+                    // make of it, for matching the key part of a chord. Level 0
+                    // of the effective layout — a virtual keyboard uploads its
+                    // own keymap, so there is no other layout to fall back to
+                    // the way `KeysymHandle` does for a Cyrillic or Greek one.
+                    let layout = vk_state.state.key_get_layout(keycode);
+                    let raw_keysym = vk_state
+                        .state
+                        .get_keymap()
+                        .key_get_syms_by_level(keycode, layout, 0)
+                        .first()
+                        .copied();
                     let mods = vk_state.mods;
                     drop(virtual_data);
-                    user_data.virtual_keyboard_key(&self.seat, keysym, mods, key, key_state, time)
+                    user_data.virtual_keyboard_key(
+                        &self.seat,
+                        keysym,
+                        raw_keysym,
+                        mods,
+                        key,
+                        key_state,
+                        time,
+                    )
                 };
                 if intercepted {
                     return;
