@@ -81,12 +81,19 @@ pub use virtual_keyboard_handle::VirtualKeyboardUserData;
 pub trait VirtualKeyboardKeyFilter: SeatHandler + Sized {
     /// Return `true` to keep the key, `false` to let it through to the client.
     ///
+    /// `keysym` is the symbol the key produces with this keyboard's modifiers
+    /// applied; `raw_keysym` is the one on the key at level 0, which is what
+    /// the key part of a chord means — "Mod4+Shift+q" is the modifier mask and
+    /// `q`, not `Q`. Matching a binding against the modified symbol misses
+    /// every shifted chord.
+    ///
     /// The default keeps nothing, which is the behaviour of this protocol
     /// before the hook existed.
     fn virtual_keyboard_key(
         &mut self,
         _seat: &Seat<Self>,
         _keysym: xkbcommon::xkb::Keysym,
+        _raw_keysym: Option<xkbcommon::xkb::Keysym>,
         _mods: crate::input::keyboard::ModifiersState,
         _keycode: u32,
         _state: wayland_server::protocol::wl_keyboard::KeyState,
