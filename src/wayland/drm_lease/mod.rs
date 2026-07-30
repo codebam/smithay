@@ -371,9 +371,19 @@ fn get_non_master_fd<P: AsRef<Path>>(path: P) -> Result<OwnedFd, Error> {
     // Attempt to drop master unconditionally. EINVAL means the fd never had
     // master to begin with (common on drivers like nvidia-drm that mark all
     // clients as authenticated regardless of master status)
+    //
+    // EACCES means the same thing on a kernel that checks permission before
+    // state: a freshly opened node held by another master cannot drop what it
+    // never had, and an unprivileged caller is refused rather than told it was
+    // not master. Measured on 7.1 with amdgpu, where every open of
+    // /dev/dri/card1 answers DROP_MASTER with EACCES — which made this reject
+    // a device that leases perfectly well. A fd that really is master drops it
+    // successfully, so neither error can hide that case.
     match drm_ffi::auth::release_master(fd.as_fd()) {
         Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
+        Err(e)
+            if e.kind() == io::ErrorKind::InvalidInput
+                || e.kind() == io::ErrorKind::PermissionDenied => {}
         Err(e) => return Err(Error::UnableToDropMaster(e)),
     }
 
