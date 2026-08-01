@@ -518,6 +518,30 @@ where
                     Some(Ok(m)) => {
                         e.insert(Box::new(m));
                         data.renderer_seen.insert(context_id, data.current_commit());
+
+                        // Wait for the client's acquire point before anything
+                        // samples this texture.
+                        //
+                        // The renderer waits, which means the GPU waits: an
+                        // exportable sync point becomes a wait on the
+                        // submission that draws this frame, and nothing blocks
+                        // on the compositor's thread.
+                        //
+                        // Nothing waited here before, and it did not have to,
+                        // because a compositor was expected to hold the commit
+                        // itself until the point signalled — the
+                        // `DrmSyncobjBlocker` the scanout path still names in
+                        // its comment. That works, and it costs a file
+                        // descriptor, two epoll registrations, a close and a
+                        // wakeup per commit per surface. A client painting far
+                        // faster than the screen pays that thousands of times
+                        // a second.
+                        #[cfg(feature = "backend_drm")]
+                        if let Some(acquire) = buffer.acquire_point() {
+                            renderer.wait(&crate::backend::renderer::sync::SyncPoint::from(
+                                acquire.clone(),
+                            ))?;
+                        }
                     }
                     Some(Err(err)) => {
                         warn!("Error loading buffer: {}", err);
