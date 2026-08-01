@@ -229,10 +229,27 @@ impl<B: Buffer> ScanoutBuffer<B> {
         signaled_fence: Option<&Arc<OwnedFd>>,
     ) -> Option<(SyncPoint, Option<Arc<OwnedFd>>)> {
         if let Self::Wayland(buffer) = self {
-            // Assume `DrmSyncobjBlocker` is used, so acquire point has already
-            // been signaled. Instead of converting with `SyncPoint::from`.
-            if buffer.acquire_point().is_some() {
-                return Some((SyncPoint::signaled(), signaled_fence.cloned()));
+            // The client's acquire point, as itself.
+            //
+            // This used to answer `SyncPoint::signaled()` on the assumption
+            // that the compositor had already waited for it with a
+            // `DrmSyncobjBlocker` — true of every compositor that follows the
+            // examples, and expensive: a blocker is a file descriptor in the
+            // event loop, two epoll registrations and a wakeup, per commit,
+            // per surface.
+            //
+            // Handed over as a real sync point it costs none of that. The
+            // caller exports a native fence from it and gives that to KMS as
+            // IN_FENCE_FD, so the display waits and the compositor does not.
+            // Where the surface cannot take a fence, `build_planes` waits for
+            // it — which is what the comment there always claimed happened.
+            //
+            // `signaled_fence` is no longer the answer, but it is still the
+            // right one for a buffer with no acquire point at all, which is
+            // the implicit-sync case the caller handles above.
+            if let Some(acquire) = buffer.acquire_point() {
+                let _ = signaled_fence;
+                return Some((SyncPoint::from(acquire.clone()), None));
             }
         }
         None
@@ -775,6 +792,17 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
                 if let Some((sync, fence)) = config.sync.as_mut() {
                     if supports_fencing && fence.is_none() {
                         *fence = sync.export().map(Arc::new);
+                    }
+                    // The wait the comment above has always promised, which
+                    // was never actually here. It cost nothing while every
+                    // wayland buffer arrived already signalled; now that a
+                    // client's acquire point is handed over as itself, a
+                    // display that cannot take an IN_FENCE_FD — or a point
+                    // that will not export one — has to be waited for
+                    // somewhere, and this is the last place before the buffer
+                    // is scanned out.
+                    if fence.is_none() && !sync.is_reached() {
+                        let _ = sync.wait();
                     }
                 }
             }
