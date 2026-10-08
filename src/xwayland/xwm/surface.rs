@@ -293,6 +293,12 @@ pub enum WmWindowProperty {
     Pid,
     Opacity,
     FrameExtents,
+    /// The client changed `_NET_WM_STATE` itself. The property belongs to the
+    /// WM, but not every client goes through the ClientMessage path for its
+    /// own requests — Wine writes the property directly, fullscreen included —
+    /// and this is forwarded once the write has been read back into the
+    /// window's state. Only a write that changed something is forwarded.
+    NetWmState,
     /// An unrecognized atom changed; forwarded so the compositor can react to
     /// compositor/application-specific properties.
     Other(Atom),
@@ -1482,6 +1488,37 @@ impl X11Surface {
             })
     }
 
+    /// Re-read the client's `_NET_WM_STATE` into our copy of the window's
+    /// state, and report whether it actually differs.
+    ///
+    /// Every state the WM changes goes out through `change_net_state`, which
+    /// updates `net_state` first and then writes the property — so the
+    /// PropertyNotify caused by the WM's own write arrives here finding the
+    /// value already known, and is answered with `false` rather than being
+    /// forwarded as if a client had asked for something. A client that wrote
+    /// the property itself — Wine, for fullscreen — is the case where the
+    /// read-back finds a new value.
+    fn update_net_wm_state(&self) -> Result<bool, ConnectionError> {
+        let Some(conn) = self.conn.upgrade() else {
+            return Ok(false);
+        };
+        let reply = conn
+            .get_property(false, self.window, self.atoms._NET_WM_STATE, AtomEnum::ATOM, 0, 1024)?
+            .reply_unchecked()?;
+        let mut fresh = std::collections::HashSet::new();
+        if let Some(reply) = reply {
+            if let Some(states) = reply.value32() {
+                fresh.extend(states);
+            }
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.net_state == fresh {
+            return Ok(false);
+        }
+        state.net_state = fresh;
+        Ok(true)
+    }
+
     fn change_net_state(&self, added: &[Atom], removed: &[Atom]) -> Result<(), ConnectionError> {
         let mut state = self.state.lock().unwrap();
 
@@ -1613,6 +1650,16 @@ impl X11Surface {
             atom if atom == self.atoms._GTK_FRAME_EXTENTS => {
                 self.update_toolkit_frame_extents()?;
                 Ok(Some(WmWindowProperty::FrameExtents))
+            }
+            atom if atom == self.atoms._NET_WM_STATE => {
+                // A property write rather than a request: read what the client
+                // wrote into our copy, and say nothing happened when the value
+                // is one we put there ourselves.
+                if self.update_net_wm_state()? {
+                    Ok(Some(WmWindowProperty::NetWmState))
+                } else {
+                    Ok(None)
+                }
             }
 
             _ => Ok(Some(WmWindowProperty::Other(atom))),
