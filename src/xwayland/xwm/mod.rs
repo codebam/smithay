@@ -272,6 +272,7 @@ mod atoms {
             _NET_WM_STATE_SKIP_TASKBAR,
             _NET_WM_STATE_SKIP_PAGER,
             _NET_WM_STATE_STICKY,
+            _NET_WM_FULLSCREEN_MONITORS,
             _NET_WM_SYNC_REQUEST,
             _NET_WM_SYNC_REQUEST_COUNTER,
             _NET_SHOWING_DESKTOP,
@@ -915,6 +916,7 @@ impl X11Wm {
             atoms._NET_WM_STATE_SKIP_PAGER,
             atoms._NET_WM_STATE_STICKY,
             atoms._NET_WM_STATE_DEMANDS_ATTENTION,
+            atoms._NET_WM_FULLSCREEN_MONITORS,
             atoms._NET_ACTIVE_WINDOW,
             atoms._NET_WM_MOVERESIZE,
             atoms._NET_CLIENT_LIST,
@@ -2762,6 +2764,25 @@ where
                 }
                 x if x == xwm.atoms.XdndDrop => {
                     xwm.dnd.handle_drop(msg.data)?;
+                }
+                x if x == xwm.atoms._NET_WM_FULLSCREEN_MONITORS => {
+                    // Wine sends this just before asking for fullscreen, and
+                    // EWMH requires the WM to set the property to the value of
+                    // the message. It is not decoration: wine's fullscreen
+                    // handshake waits on the property coming back, and when it
+                    // never does the request is reverted about two seconds
+                    // later — a game that reaches fullscreen and then drops
+                    // out of it on its own. The layout stays the compositor's;
+                    // the single-monitor case wine sends here is exactly what
+                    // the ordinary fullscreen path already covers.
+                    let data = msg.data.as_data32();
+                    xwm.conn.change_property32(
+                        PropMode::REPLACE,
+                        msg.window,
+                        xwm.atoms._NET_WM_FULLSCREEN_MONITORS,
+                        AtomEnum::CARDINAL,
+                        &data[0..4],
+                    )?;
                 }
                 x => {
                     debug!(
