@@ -442,6 +442,30 @@ impl DrmDevice {
         }
     }
 
+    /// Restore the state the card was in before this compositor took it, now.
+    ///
+    /// The restore otherwise happens in `Drop`, which is too late when the
+    /// device is still referenced at process exit: the compositor's own
+    /// teardown can only drop what it owns, and a detached thread or a stored
+    /// handle keeps the inner `Arc` alive past `_exit`. Calling this from the
+    /// teardown that knows the session is over makes the restore happen
+    /// deterministically; the flag is then cleared so the eventual `Drop` does
+    /// not commit it twice.
+    ///
+    /// Atomic only: the legacy device's restore drains the captured map to
+    /// drive `set_crtc` per CRTC, and that state is behind the shared `Arc`,
+    /// so it cannot be reached by `&self` here. The legacy path keeps its
+    /// `Drop` restore.
+    pub fn restore_previous_state(&mut self) {
+        if !self.is_active() {
+            return;
+        }
+        if let DrmDeviceInternal::Atomic(internal) = &*self.internal {
+            internal.restore_previous_state();
+            self.set_active(false);
+        }
+    }
+
     /// Returns if the device is currently paused or not.
     pub fn is_active(&self) -> bool {
         match &*self.internal {

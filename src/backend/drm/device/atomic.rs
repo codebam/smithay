@@ -271,11 +271,17 @@ impl AtomicDrmDevice {
     }
 }
 
-impl Drop for AtomicDrmDevice {
-    fn drop(&mut self) {
-        if !self.active.load(Ordering::SeqCst) {
-            return;
-        }
+impl AtomicDrmDevice {
+    /// Put the card back the way it was found.
+    ///
+    /// Called from `Drop` for every path that lets the device go, and directly
+    /// by a compositor whose teardown knows the session is ending: a device
+    /// that outlives its compositor — reached from a detached thread, or from
+    /// a handle another object still holds — never runs `Drop` before the
+    /// process calls `_exit`, and then the console is left as the compositor
+    /// left it. Doing it explicitly needs no ownership the `Arc` does not
+    /// give, which is why this takes `&self`: the captured state is read-only.
+    pub(crate) fn restore_previous_state(&self) {
         let _guard = self.span.enter();
 
         // Here we restore the card to the state it was in when we took it
@@ -316,6 +322,15 @@ impl Drop for AtomicDrmDevice {
         if let Err(err) = self.fd.atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req) {
             error!("Failed to restore previous state. Error: {}", err);
         }
+    }
+}
+
+impl Drop for AtomicDrmDevice {
+    fn drop(&mut self) {
+        if !self.active.load(Ordering::SeqCst) {
+            return;
+        }
+        self.restore_previous_state();
     }
 }
 
